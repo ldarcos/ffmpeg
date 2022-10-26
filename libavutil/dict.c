@@ -22,7 +22,6 @@
 
 #include "avstring.h"
 #include "dict.h"
-#include "dict_internal.h"
 #include "internal.h"
 #include "mem.h"
 #include "time_internal.h"
@@ -43,7 +42,7 @@ AVDictionaryEntry *av_dict_get(const AVDictionary *m, const char *key,
 {
     unsigned int i, j;
 
-    if (!m || !key)
+    if (!m)
         return NULL;
 
     if (prev)
@@ -73,17 +72,8 @@ int av_dict_set(AVDictionary **pm, const char *key, const char *value,
 {
     AVDictionary *m = *pm;
     AVDictionaryEntry *tag = NULL;
-    char *copy_key = NULL, *copy_value = NULL;
-    int err;
+    char *oldval = NULL, *copy_key = NULL, *copy_value = NULL;
 
-    if (flags & AV_DICT_DONT_STRDUP_VAL)
-        copy_value = (void *)value;
-    else if (value)
-        copy_value = av_strdup(value);
-    if (!key) {
-        err = AVERROR(EINVAL);
-        goto err_out;
-    }
     if (!(flags & AV_DICT_MULTIKEY)) {
         tag = av_dict_get(m, key, NULL, flags);
     }
@@ -91,10 +81,14 @@ int av_dict_set(AVDictionary **pm, const char *key, const char *value,
         copy_key = (void *)key;
     else
         copy_key = av_strdup(key);
+    if (flags & AV_DICT_DONT_STRDUP_VAL)
+        copy_value = (void *)value;
+    else if (copy_key)
+        copy_value = av_strdup(value);
     if (!m)
         m = *pm = av_mallocz(sizeof(*m));
-    if (!m || !copy_key || (value && !copy_value))
-        goto enomem;
+    if (!m || (key && !copy_key) || (value && !copy_value))
+        goto err_out;
 
     if (tag) {
         if (flags & AV_DICT_DONT_OVERWRITE) {
@@ -102,17 +96,9 @@ int av_dict_set(AVDictionary **pm, const char *key, const char *value,
             av_free(copy_value);
             return 0;
         }
-        if (copy_value && flags & AV_DICT_APPEND) {
-            size_t oldlen = strlen(tag->value);
-            size_t new_part_len = strlen(copy_value);
-            size_t len = oldlen + new_part_len + 1;
-            char *newval = av_realloc(tag->value, len);
-            if (!newval)
-                goto enomem;
-            memcpy(newval + oldlen, copy_value, new_part_len + 1);
-            av_freep(&copy_value);
-            copy_value = newval;
-        } else
+        if (flags & AV_DICT_APPEND)
+            oldval = tag->value;
+        else
             av_free(tag->value);
         av_free(tag->key);
         *tag = m->elems[--m->count];
@@ -120,25 +106,34 @@ int av_dict_set(AVDictionary **pm, const char *key, const char *value,
         AVDictionaryEntry *tmp = av_realloc_array(m->elems,
                                                   m->count + 1, sizeof(*m->elems));
         if (!tmp)
-            goto enomem;
+            goto err_out;
         m->elems = tmp;
     }
     if (copy_value) {
         m->elems[m->count].key = copy_key;
         m->elems[m->count].value = copy_value;
+        if (oldval && flags & AV_DICT_APPEND) {
+            size_t len = strlen(oldval) + strlen(copy_value) + 1;
+            char *newval = av_mallocz(len);
+            if (!newval)
+                goto err_out;
+            av_strlcat(newval, oldval, len);
+            av_freep(&oldval);
+            av_strlcat(newval, copy_value, len);
+            m->elems[m->count].value = newval;
+            av_freep(&copy_value);
+        }
         m->count++;
     } else {
-        if (!m->count) {
-            av_freep(&m->elems);
-            av_freep(pm);
-        }
         av_freep(&copy_key);
+    }
+    if (!m->count) {
+        av_freep(&m->elems);
+        av_freep(pm);
     }
 
     return 0;
 
-enomem:
-    err = AVERROR(ENOMEM);
 err_out:
     if (m && !m->count) {
         av_freep(&m->elems);
@@ -146,7 +141,7 @@ err_out:
     }
     av_free(copy_key);
     av_free(copy_value);
-    return err;
+    return AVERROR(ENOMEM);
 }
 
 int av_dict_set_int(AVDictionary **pm, const char *key, int64_t value,

@@ -19,7 +19,6 @@
  */
 #include "avformat.h"
 #include "internal.h"
-#include "mux.h"
 #include "libavutil/intreadwrite.h"
 
 typedef struct IVFEncContext {
@@ -122,7 +121,7 @@ static const AVCodecTag codec_ivf_tags[] = {
     { AV_CODEC_ID_NONE, 0 }
 };
 
-const AVOutputFormat ff_ivf_muxer = {
+AVOutputFormat ff_ivf_muxer = {
     .priv_data_size = sizeof(IVFEncContext),
     .name         = "ivf",
     .long_name    = NULL_IF_CONFIG_SMALL("On2 IVF"),

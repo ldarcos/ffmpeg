@@ -24,6 +24,7 @@
  */
 
 #include "dnn_backend_native.h"
+#include "libavutil/avassert.h"
 #include "dnn_backend_native_layer_mathbinary.h"
 
 typedef float (*FunType)(float src0, float src1);
@@ -159,12 +160,12 @@ int ff_dnn_execute_layer_math_binary(DnnOperand *operands, const int32_t *input_
     output->length = ff_calculate_operand_data_length(output);
     if (output->length <= 0) {
         av_log(ctx, AV_LOG_ERROR, "The output data length overflow\n");
-        return AVERROR(EINVAL);
+        return DNN_ERROR;
     }
     output->data = av_realloc(output->data, output->length);
     if (!output->data) {
         av_log(ctx, AV_LOG_ERROR, "Failed to reallocate memory for output\n");
-        return AVERROR(ENOMEM);
+        return DNN_ERROR;
     }
 
     switch (params->bin_op) {
@@ -188,6 +189,6 @@ int ff_dnn_execute_layer_math_binary(DnnOperand *operands, const int32_t *input_
         return 0;
     default:
         av_log(ctx, AV_LOG_ERROR, "Unmatch math binary operator\n");
-        return AVERROR(EINVAL);
+        return DNN_ERROR;
     }
 }

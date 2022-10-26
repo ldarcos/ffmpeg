@@ -79,6 +79,8 @@ typedef struct APEContext {
     uint32_t samplerate;
 } APEContext;
 
+static int ape_read_close(AVFormatContext * s);
+
 static int ape_probe(const AVProbeData * p)
 {
     int version = AV_RL16(p->buf+4);
@@ -146,7 +148,7 @@ static int ape_read_header(AVFormatContext * s)
     AVStream *st;
     uint32_t tag;
     int i, ret;
-    int64_t total_blocks;
+    int total_blocks;
     int64_t final_size = 0;
     int64_t pts, file_size;
 
@@ -275,7 +277,8 @@ static int ape_read_header(AVFormatContext * s)
 
         if (pb->eof_reached) {
             av_log(s, AV_LOG_ERROR, "seektable truncated\n");
-            return AVERROR_INVALIDDATA;
+            ret = AVERROR_INVALIDDATA;
+            goto fail;
         }
         ff_dlog(s, "seektable: %8d   %"PRIu32"\n", i, seektable_entry);
     }
@@ -313,7 +316,8 @@ static int ape_read_header(AVFormatContext * s)
             ff_dlog(s, "bittable: %2d\n", bits);
             if (pb->eof_reached) {
                 av_log(s, AV_LOG_ERROR, "bittable truncated\n");
-                return AVERROR_INVALIDDATA;
+                ret = AVERROR_INVALIDDATA;
+                goto fail;
             }
         }
     }
@@ -326,15 +330,17 @@ static int ape_read_header(AVFormatContext * s)
 
     /* now we are ready: build format streams */
     st = avformat_new_stream(s, NULL);
-    if (!st)
-        return AVERROR(ENOMEM);
+    if (!st) {
+        ret = AVERROR(ENOMEM);
+        goto fail;
+    }
 
-    total_blocks = (ape->totalframes == 0) ? 0 : ((int64_t)(ape->totalframes - 1) * ape->blocksperframe) + ape->finalframeblocks;
+    total_blocks = (ape->totalframes == 0) ? 0 : ((ape->totalframes - 1) * ape->blocksperframe) + ape->finalframeblocks;
 
     st->codecpar->codec_type      = AVMEDIA_TYPE_AUDIO;
     st->codecpar->codec_id        = AV_CODEC_ID_APE;
     st->codecpar->codec_tag       = MKTAG('A', 'P', 'E', ' ');
-    st->codecpar->ch_layout.nb_channels = ape->channels;
+    st->codecpar->channels        = ape->channels;
     st->codecpar->sample_rate     = ape->samplerate;
     st->codecpar->bits_per_coded_sample = ape->bps;
 
@@ -344,7 +350,7 @@ static int ape_read_header(AVFormatContext * s)
     avpriv_set_pts_info(st, 64, 1, ape->samplerate);
 
     if ((ret = ff_alloc_extradata(st->codecpar, APE_EXTRADATA_SIZE)) < 0)
-        return ret;
+        goto fail;
     AV_WL16(st->codecpar->extradata + 0, ape->fileversion);
     AV_WL16(st->codecpar->extradata + 2, ape->compressiontype);
     AV_WL16(st->codecpar->extradata + 4, ape->formatflags);
@@ -363,6 +369,10 @@ static int ape_read_header(AVFormatContext * s)
     }
 
     return 0;
+fail:
+    ape_read_close(s);
+
+    return ret;
 }
 
 static int ape_read_packet(AVFormatContext * s, AVPacket * pkt)
@@ -413,7 +423,6 @@ static int ape_read_packet(AVFormatContext * s, AVPacket * pkt)
     /* note: we need to modify the packet size here to handle the last
        packet */
     pkt->size = ret + extra_size;
-    pkt->duration = nblocks;
 
     ape->currentframe++;
 
@@ -438,17 +447,16 @@ static int ape_read_seek(AVFormatContext *s, int stream_index, int64_t timestamp
     if (index < 0)
         return -1;
 
-    if ((ret = avio_seek(s->pb, ffstream(st)->index_entries[index].pos, SEEK_SET)) < 0)
+    if ((ret = avio_seek(s->pb, st->index_entries[index].pos, SEEK_SET)) < 0)
         return ret;
     ape->currentframe = index;
     return 0;
 }
 
-const AVInputFormat ff_ape_demuxer = {
+AVInputFormat ff_ape_demuxer = {
     .name           = "ape",
     .long_name      = NULL_IF_CONFIG_SMALL("Monkey's Audio"),
     .priv_data_size = sizeof(APEContext),
-    .flags_internal = FF_FMT_INIT_CLEANUP,
     .read_probe     = ape_probe,
     .read_header    = ape_read_header,
     .read_packet    = ape_read_packet,

@@ -21,7 +21,6 @@
  */
 
 #include "config.h"
-#include "config_components.h"
 
 #include "libavutil/common.h"
 #include "libavutil/error.h"
@@ -243,7 +242,7 @@ fail:
     return ret;
 }
 
-static AVBufferRef *nvdec_decoder_frame_alloc(void *opaque, size_t size)
+static AVBufferRef *nvdec_decoder_frame_alloc(void *opaque, buffer_size_t size)
 {
     NVDECFramePool *pool = opaque;
     AVBufferRef *ret;
@@ -284,7 +283,7 @@ static void nvdec_free_dummy(struct AVHWFramesContext *ctx)
     av_buffer_pool_uninit(&ctx->pool);
 }
 
-static AVBufferRef *nvdec_alloc_dummy(size_t size)
+static AVBufferRef *nvdec_alloc_dummy(buffer_size_t size)
 {
     return av_buffer_create(NULL, 0, NULL, NULL, 0);
 }
@@ -524,16 +523,16 @@ static int nvdec_retrieve_data(void *logctx, AVFrame *frame)
         goto copy_fail;
     }
 
-    ret = av_buffer_replace(&frame->hw_frames_ctx, decoder->real_hw_frames_ref);
-    if (ret < 0)
-        goto copy_fail;
-
-    unmap_data->idx = cf->idx;
-    if (!(unmap_data->idx_ref     = av_buffer_ref(cf->idx_ref)) ||
-        !(unmap_data->decoder_ref = av_buffer_ref(cf->decoder_ref))) {
+    av_buffer_unref(&frame->hw_frames_ctx);
+    frame->hw_frames_ctx = av_buffer_ref(decoder->real_hw_frames_ref);
+    if (!frame->hw_frames_ctx) {
         ret = AVERROR(ENOMEM);
         goto copy_fail;
     }
+
+    unmap_data->idx = cf->idx;
+    unmap_data->idx_ref = av_buffer_ref(cf->idx_ref);
+    unmap_data->decoder_ref = av_buffer_ref(cf->decoder_ref);
 
     av_pix_fmt_get_chroma_sub_sample(hwctx->sw_format, &shift_h, &shift_v);
     for (i = 0; frame->linesize[i]; i++) {

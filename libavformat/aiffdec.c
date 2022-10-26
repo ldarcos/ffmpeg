@@ -22,7 +22,6 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/dict.h"
 #include "avformat.h"
-#include "demux.h"
 #include "internal.h"
 #include "pcm.h"
 #include "aiff.h"
@@ -100,13 +99,11 @@ static int get_aiff_header(AVFormatContext *s, int64_t size,
     uint64_t val;
     int sample_rate;
     unsigned int num_frames;
-    int channels;
 
     if (size & 1)
         size++;
     par->codec_type = AVMEDIA_TYPE_AUDIO;
-    channels = avio_rb16(pb);
-    par->ch_layout.nb_channels = channels;
+    par->channels = avio_rb16(pb);
     num_frames = avio_rb32(pb);
     par->bits_per_coded_sample = avio_rb16(pb);
 
@@ -154,10 +151,10 @@ static int get_aiff_header(AVFormatContext *s, int64_t size,
             aiff->block_duration = 1;
             break;
         case AV_CODEC_ID_ADPCM_IMA_QT:
-            par->block_align = 34 * channels;
+            par->block_align = 34 * par->channels;
             break;
         case AV_CODEC_ID_MACE3:
-            par->block_align = 2 * channels;
+            par->block_align = 2 * par->channels;
             break;
         case AV_CODEC_ID_ADPCM_G726LE:
             par->bits_per_coded_sample = 5;
@@ -165,7 +162,7 @@ static int get_aiff_header(AVFormatContext *s, int64_t size,
         case AV_CODEC_ID_ADPCM_G722:
         case AV_CODEC_ID_MACE6:
         case AV_CODEC_ID_SDX2_DPCM:
-            par->block_align = 1 * channels;
+            par->block_align = 1 * par->channels;
             break;
         case AV_CODEC_ID_GSM:
             par->block_align = 33;
@@ -182,7 +179,7 @@ static int get_aiff_header(AVFormatContext *s, int64_t size,
     /* Block align needs to be computed in all cases, as the definition
      * is specific to applications -> here we use the WAVE format definition */
     if (!par->block_align)
-        par->block_align = (av_get_bits_per_sample(par->codec_id) * channels) >> 3;
+        par->block_align = (av_get_bits_per_sample(par->codec_id) * par->channels) >> 3;
 
     if (aiff->block_duration) {
         par->bit_rate = av_rescale(par->sample_rate, par->block_align * 8LL,
@@ -221,7 +218,7 @@ static int aiff_read_header(AVFormatContext *s)
     AVIOContext *pb = s->pb;
     AVStream * st;
     AIFFInputContext *aiff = s->priv_data;
-    ID3v2ExtraMeta *id3v2_extra_meta;
+    ID3v2ExtraMeta *id3v2_extra_meta = NULL;
 
     /* check FORM header */
     filesize = get_tag(pb, &tag);
@@ -308,7 +305,7 @@ static int aiff_read_header(AVFormatContext *s)
             break;
         case MKTAG('w', 'a', 'v', 'e'):
             if ((uint64_t)size > (1<<30))
-                return AVERROR_INVALIDDATA;
+                return -1;
             if ((ret = ff_get_extradata(s, st->codecpar, pb, size)) < 0)
                 return ret;
             if (   (st->codecpar->codec_id == AV_CODEC_ID_QDMC || st->codecpar->codec_id == AV_CODEC_ID_QDM2)
@@ -370,7 +367,7 @@ got_sound:
         st->codecpar->block_align = 35;
     } else if (st->codecpar->block_align <= 0) {
         av_log(s, AV_LOG_ERROR, "could not find COMM tag or invalid block_align value\n");
-        return AVERROR_INVALIDDATA;
+        return -1;
     }
     if (aiff->block_duration < 0)
         return AVERROR_INVALIDDATA;
@@ -432,7 +429,7 @@ static int aiff_read_packet(AVFormatContext *s,
     return 0;
 }
 
-const AVInputFormat ff_aiff_demuxer = {
+AVInputFormat ff_aiff_demuxer = {
     .name           = "aiff",
     .long_name      = NULL_IF_CONFIG_SMALL("Audio IFF"),
     .priv_data_size = sizeof(AIFFInputContext),

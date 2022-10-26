@@ -16,10 +16,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include <inttypes.h>
+#include <stdio.h>
 
 #include "libavutil/avstring.h"
-#include "libavutil/avutil.h"
+#include "libavutil/common.h"
 #include "libavutil/log.h"
 
 #include "bsf.h"
@@ -95,19 +95,6 @@ static int trace_headers(AVBSFContext *bsf, AVPacket *pkt)
 
     av_log(bsf, AV_LOG_INFO, "Packet: %d bytes%s.\n", pkt->size, tmp);
 
-    if (av_packet_get_side_data(pkt, AV_PKT_DATA_NEW_EXTRADATA, NULL)) {
-        av_log(bsf, AV_LOG_INFO, "Side data:\n");
-
-        err = ff_cbs_read_packet_side_data(ctx->cbc, frag, pkt);
-        ff_cbs_fragment_reset(frag);
-
-        if (err < 0) {
-            av_packet_unref(pkt);
-            return err;
-        }
-        av_log(bsf, AV_LOG_INFO, "Payload:\n");
-    }
-
     err = ff_cbs_read_packet(ctx->cbc, frag, pkt);
 
     ff_cbs_fragment_reset(frag);
@@ -117,11 +104,11 @@ static int trace_headers(AVBSFContext *bsf, AVPacket *pkt)
     return err;
 }
 
-const FFBitStreamFilter ff_trace_headers_bsf = {
-    .p.name         = "trace_headers",
-    .p.codec_ids    = ff_cbs_all_codec_ids,
+const AVBitStreamFilter ff_trace_headers_bsf = {
+    .name           = "trace_headers",
     .priv_data_size = sizeof(TraceHeadersContext),
     .init           = &trace_headers_init,
     .close          = &trace_headers_close,
     .filter         = &trace_headers,
+    .codec_ids      = ff_cbs_all_codec_ids,
 };

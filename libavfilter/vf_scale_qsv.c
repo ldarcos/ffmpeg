@@ -21,7 +21,7 @@
  * scale video filter - QSV
  */
 
-#include <mfxvideo.h>
+#include <mfx/mfxvideo.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -69,7 +69,7 @@ enum var_name {
     VARS_NB
 };
 
-#define MFX_IMPL_VIA_MASK(impl) (0x0f00 & (impl))
+#define QSV_HAVE_SCALING_CONFIG  QSV_VERSION_ATLEAST(1, 19)
 
 typedef struct QSVScaleContext {
     const AVClass *class;
@@ -89,14 +89,14 @@ typedef struct QSVScaleContext {
     mfxFrameSurface1 **surface_ptrs_out;
     int             nb_surface_ptrs_out;
 
-#if QSV_HAVE_OPAQUE
     mfxExtOpaqueSurfaceAlloc opaque_alloc;
-#endif
 
+#if QSV_HAVE_SCALING_CONFIG
     mfxExtVPPScaling         scale_conf;
+#endif
     int                      mode;
 
-    mfxExtBuffer             *ext_buffers[2];
+    mfxExtBuffer             *ext_buffers[1 + QSV_HAVE_SCALING_CONFIG];
     int                      num_ext_buf;
 
     int shift_width, shift_height;
@@ -155,6 +155,20 @@ static av_cold void qsvscale_uninit(AVFilterContext *ctx)
     s->nb_surface_ptrs_out = 0;
 }
 
+static int qsvscale_query_formats(AVFilterContext *ctx)
+{
+    static const enum AVPixelFormat pixel_formats[] = {
+        AV_PIX_FMT_QSV, AV_PIX_FMT_NONE,
+    };
+    AVFilterFormats *pix_fmts  = ff_make_format_list(pixel_formats);
+    int ret;
+
+    if ((ret = ff_set_common_formats(ctx, pix_fmts)) < 0)
+        return ret;
+
+    return 0;
+}
+
 static int init_out_pool(AVFilterContext *ctx,
                          int out_width, int out_height)
 {
@@ -192,7 +206,7 @@ static int init_out_pool(AVFilterContext *ctx,
     out_frames_ctx->sw_format         = out_format;
     out_frames_ctx->initial_pool_size = 4;
 
-    out_frames_hwctx->frame_type = in_frames_hwctx->frame_type | MFX_MEMTYPE_FROM_VPPOUT;
+    out_frames_hwctx->frame_type = in_frames_hwctx->frame_type;
 
     ret = ff_filter_init_hw_frames(ctx, outlink, 32);
     if (ret < 0)
@@ -250,15 +264,15 @@ static mfxStatus frame_unlock(mfxHDL pthis, mfxMemId mid, mfxFrameData *ptr)
 
 static mfxStatus frame_get_hdl(mfxHDL pthis, mfxMemId mid, mfxHDL *hdl)
 {
-    mfxHDLPair *pair_dst = (mfxHDLPair*)hdl;
-    mfxHDLPair *pair_src = (mfxHDLPair*)mid;
-
-    pair_dst->first = pair_src->first;
-
-    if (pair_src->second != (mfxMemId)MFX_INFINITE)
-        pair_dst->second = pair_src->second;
+    *hdl = mid;
     return MFX_ERR_NONE;
 }
+
+static const mfxHandleType handle_types[] = {
+    MFX_HANDLE_VA_DISPLAY,
+    MFX_HANDLE_D3D9_DEVICE_MANAGER,
+    MFX_HANDLE_D3D11_DEVICE,
+};
 
 static int init_out_session(AVFilterContext *ctx)
 {
@@ -270,7 +284,7 @@ static int init_out_session(AVFilterContext *ctx)
     AVQSVFramesContext *out_frames_hwctx = out_frames_ctx->hwctx;
     AVQSVDeviceContext     *device_hwctx = in_frames_ctx->device_ctx->hwctx;
 
-    int opaque = 0;
+    int opaque = !!(in_frames_hwctx->frame_type & MFX_MEMTYPE_OPAQUE_FRAME);
 
     mfxHDL handle = NULL;
     mfxHandleType handle_type;
@@ -278,11 +292,8 @@ static int init_out_session(AVFilterContext *ctx)
     mfxIMPL impl;
     mfxVideoParam par;
     mfxStatus err;
-    int i, ret;
+    int i;
 
-#if QSV_HAVE_OPAQUE
-    opaque = !!(in_frames_hwctx->frame_type & MFX_MEMTYPE_OPAQUE_FRAME);
-#endif
     s->num_ext_buf = 0;
 
     /* extract the properties of the "master" session given to us */
@@ -294,18 +305,14 @@ static int init_out_session(AVFilterContext *ctx)
         return AVERROR_UNKNOWN;
     }
 
-    if (MFX_IMPL_VIA_VAAPI == MFX_IMPL_VIA_MASK(impl)) {
-        handle_type = MFX_HANDLE_VA_DISPLAY;
-    } else if (MFX_IMPL_VIA_D3D11 == MFX_IMPL_VIA_MASK(impl)) {
-        handle_type = MFX_HANDLE_D3D11_DEVICE;
-    } else if (MFX_IMPL_VIA_D3D9 == MFX_IMPL_VIA_MASK(impl)) {
-        handle_type = MFX_HANDLE_D3D9_DEVICE_MANAGER;
-    } else {
-        av_log(ctx, AV_LOG_ERROR, "Error unsupported handle type\n");
-        return AVERROR_UNKNOWN;
+    for (i = 0; i < FF_ARRAY_ELEMS(handle_types); i++) {
+        err = MFXVideoCORE_GetHandle(device_hwctx->session, handle_types[i], &handle);
+        if (err == MFX_ERR_NONE) {
+            handle_type = handle_types[i];
+            break;
+        }
     }
 
-    err = MFXVideoCORE_GetHandle(device_hwctx->session, handle_type, &handle);
     if (err < 0)
         return ff_qsvvpp_print_error(ctx, err, "Error getting the session handle");
     else if (err > 0) {
@@ -315,10 +322,11 @@ static int init_out_session(AVFilterContext *ctx)
 
     /* create a "slave" session with those same properties, to be used for
      * actual scaling */
-    ret = ff_qsvvpp_create_mfx_session(ctx, device_hwctx->loader, impl, &ver,
-                                       &s->session);
-    if (ret)
-        return ret;
+    err = MFXInit(impl, &ver, &s->session);
+    if (err != MFX_ERR_NONE) {
+        av_log(ctx, AV_LOG_ERROR, "Error initializing a session for scaling\n");
+        return AVERROR_UNKNOWN;
+    }
 
     if (handle) {
         err = MFXVideoCORE_SetHandle(s->session, handle_type, handle);
@@ -334,50 +342,17 @@ static int init_out_session(AVFilterContext *ctx)
 
     memset(&par, 0, sizeof(par));
 
-    if (!opaque) {
-        mfxFrameAllocator frame_allocator = {
-            .pthis  = ctx,
-            .Alloc  = frame_alloc,
-            .Lock   = frame_lock,
-            .Unlock = frame_unlock,
-            .GetHDL = frame_get_hdl,
-            .Free   = frame_free,
-        };
-
-        s->mem_ids_in = av_calloc(in_frames_hwctx->nb_surfaces,
-                                  sizeof(*s->mem_ids_in));
-        if (!s->mem_ids_in)
-            return AVERROR(ENOMEM);
-        for (i = 0; i < in_frames_hwctx->nb_surfaces; i++)
-            s->mem_ids_in[i] = in_frames_hwctx->surfaces[i].Data.MemId;
-        s->nb_mem_ids_in = in_frames_hwctx->nb_surfaces;
-
-        s->mem_ids_out = av_calloc(out_frames_hwctx->nb_surfaces,
-                                   sizeof(*s->mem_ids_out));
-        if (!s->mem_ids_out)
-            return AVERROR(ENOMEM);
-        for (i = 0; i < out_frames_hwctx->nb_surfaces; i++)
-            s->mem_ids_out[i] = out_frames_hwctx->surfaces[i].Data.MemId;
-        s->nb_mem_ids_out = out_frames_hwctx->nb_surfaces;
-
-        err = MFXVideoCORE_SetFrameAllocator(s->session, &frame_allocator);
-        if (err != MFX_ERR_NONE)
-            return AVERROR_UNKNOWN;
-
-        par.IOPattern = MFX_IOPATTERN_IN_VIDEO_MEMORY | MFX_IOPATTERN_OUT_VIDEO_MEMORY;
-    }
-#if QSV_HAVE_OPAQUE
-    else {
-        s->surface_ptrs_in = av_calloc(in_frames_hwctx->nb_surfaces,
-                                       sizeof(*s->surface_ptrs_in));
+    if (opaque) {
+        s->surface_ptrs_in = av_mallocz_array(in_frames_hwctx->nb_surfaces,
+                                              sizeof(*s->surface_ptrs_in));
         if (!s->surface_ptrs_in)
             return AVERROR(ENOMEM);
         for (i = 0; i < in_frames_hwctx->nb_surfaces; i++)
             s->surface_ptrs_in[i] = in_frames_hwctx->surfaces + i;
         s->nb_surface_ptrs_in = in_frames_hwctx->nb_surfaces;
 
-        s->surface_ptrs_out = av_calloc(out_frames_hwctx->nb_surfaces,
-                                        sizeof(*s->surface_ptrs_out));
+        s->surface_ptrs_out = av_mallocz_array(out_frames_hwctx->nb_surfaces,
+                                               sizeof(*s->surface_ptrs_out));
         if (!s->surface_ptrs_out)
             return AVERROR(ENOMEM);
         for (i = 0; i < out_frames_hwctx->nb_surfaces; i++)
@@ -398,15 +373,47 @@ static int init_out_session(AVFilterContext *ctx)
         s->ext_buffers[s->num_ext_buf++] = (mfxExtBuffer*)&s->opaque_alloc;
 
         par.IOPattern = MFX_IOPATTERN_IN_OPAQUE_MEMORY | MFX_IOPATTERN_OUT_OPAQUE_MEMORY;
-    }
-#endif
+    } else {
+        mfxFrameAllocator frame_allocator = {
+            .pthis  = ctx,
+            .Alloc  = frame_alloc,
+            .Lock   = frame_lock,
+            .Unlock = frame_unlock,
+            .GetHDL = frame_get_hdl,
+            .Free   = frame_free,
+        };
 
+        s->mem_ids_in = av_mallocz_array(in_frames_hwctx->nb_surfaces,
+                                         sizeof(*s->mem_ids_in));
+        if (!s->mem_ids_in)
+            return AVERROR(ENOMEM);
+        for (i = 0; i < in_frames_hwctx->nb_surfaces; i++)
+            s->mem_ids_in[i] = in_frames_hwctx->surfaces[i].Data.MemId;
+        s->nb_mem_ids_in = in_frames_hwctx->nb_surfaces;
+
+        s->mem_ids_out = av_mallocz_array(out_frames_hwctx->nb_surfaces,
+                                          sizeof(*s->mem_ids_out));
+        if (!s->mem_ids_out)
+            return AVERROR(ENOMEM);
+        for (i = 0; i < out_frames_hwctx->nb_surfaces; i++)
+            s->mem_ids_out[i] = out_frames_hwctx->surfaces[i].Data.MemId;
+        s->nb_mem_ids_out = out_frames_hwctx->nb_surfaces;
+
+        err = MFXVideoCORE_SetFrameAllocator(s->session, &frame_allocator);
+        if (err != MFX_ERR_NONE)
+            return AVERROR_UNKNOWN;
+
+        par.IOPattern = MFX_IOPATTERN_IN_VIDEO_MEMORY | MFX_IOPATTERN_OUT_VIDEO_MEMORY;
+    }
+
+#if QSV_HAVE_SCALING_CONFIG
     memset(&s->scale_conf, 0, sizeof(mfxExtVPPScaling));
     s->scale_conf.Header.BufferId     = MFX_EXTBUFF_VPP_SCALING;
     s->scale_conf.Header.BufferSz     = sizeof(mfxExtVPPScaling);
     s->scale_conf.ScalingMode         = s->mode;
     s->ext_buffers[s->num_ext_buf++]  = (mfxExtBuffer*)&s->scale_conf;
     av_log(ctx, AV_LOG_VERBOSE, "Scaling mode: %d\n", s->mode);
+#endif
 
     par.ExtParam    = s->ext_buffers;
     par.NumExtParam = s->num_ext_buf;
@@ -622,9 +629,15 @@ static const AVOption options[] = {
     { "h",      "Output video height", OFFSET(h_expr),     AV_OPT_TYPE_STRING, { .str = "ih"   }, .flags = FLAGS },
     { "format", "Output pixel format", OFFSET(format_str), AV_OPT_TYPE_STRING, { .str = "same" }, .flags = FLAGS },
 
+#if QSV_HAVE_SCALING_CONFIG
     { "mode",      "set scaling mode",    OFFSET(mode),    AV_OPT_TYPE_INT,    { .i64 = MFX_SCALING_MODE_DEFAULT}, MFX_SCALING_MODE_DEFAULT, MFX_SCALING_MODE_QUALITY, FLAGS, "mode"},
     { "low_power", "low power mode",        0,             AV_OPT_TYPE_CONST,  { .i64 = MFX_SCALING_MODE_LOWPOWER}, INT_MIN, INT_MAX, FLAGS, "mode"},
     { "hq",        "high quality mode",     0,             AV_OPT_TYPE_CONST,  { .i64 = MFX_SCALING_MODE_QUALITY},  INT_MIN, INT_MAX, FLAGS, "mode"},
+#else
+    { "mode",      "(not supported)",     OFFSET(mode),    AV_OPT_TYPE_INT,    { .i64 = 0}, 0, INT_MAX, FLAGS, "mode"},
+    { "low_power", "",                      0,             AV_OPT_TYPE_CONST,  { .i64 = 1}, 0,   0,     FLAGS, "mode"},
+    { "hq",        "",                      0,             AV_OPT_TYPE_CONST,  { .i64 = 2}, 0,   0,     FLAGS, "mode"},
+#endif
 
     { NULL },
 };
@@ -642,6 +655,7 @@ static const AVFilterPad qsvscale_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = qsvscale_filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad qsvscale_outputs[] = {
@@ -650,22 +664,22 @@ static const AVFilterPad qsvscale_outputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = qsvscale_config_props,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_scale_qsv = {
+AVFilter ff_vf_scale_qsv = {
     .name      = "scale_qsv",
     .description = NULL_IF_CONFIG_SMALL("QuickSync video scaling and format conversion"),
 
     .init          = qsvscale_init,
     .uninit        = qsvscale_uninit,
+    .query_formats = qsvscale_query_formats,
 
     .priv_size = sizeof(QSVScaleContext),
     .priv_class = &qsvscale_class,
 
-    FILTER_INPUTS(qsvscale_inputs),
-    FILTER_OUTPUTS(qsvscale_outputs),
-
-    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_QSV),
+    .inputs    = qsvscale_inputs,
+    .outputs   = qsvscale_outputs,
 
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

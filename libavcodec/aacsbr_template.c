@@ -811,7 +811,7 @@ static int read_sbr_envelope(AACContext *ac, SpectralBandReplication *sbr, GetBi
 {
     int bits;
     int i, j, k;
-    const VLCElem *t_huff, *f_huff;
+    VLC_TYPE (*t_huff)[2], (*f_huff)[2];
     int t_lav, f_lav;
     const int delta = (ch == 1 && sbr->bs_coupling == 1) + 1;
     const int odd = sbr->n[1] & 1;
@@ -899,7 +899,7 @@ static int read_sbr_noise(AACContext *ac, SpectralBandReplication *sbr, GetBitCo
                            SBRData *ch_data, int ch)
 {
     int i, j;
-    const VLCElem *t_huff, *f_huff;
+    VLC_TYPE (*t_huff)[2], (*f_huff)[2];
     int t_lav, f_lav;
     int delta = (ch == 1 && sbr->bs_coupling == 1) + 1;
 
@@ -955,8 +955,6 @@ static void read_sbr_extension(AACContext *ac, SpectralBandReplication *sbr,
         } else {
             *num_bits_left -= ff_ps_read_data(ac->avctx, gb, &sbr->ps.common, *num_bits_left);
             ac->avctx->profile = FF_PROFILE_AAC_HE_V2;
-            // ensure the warning is not printed if PS extension is present
-            ac->warned_he_aac_mono = 1;
         }
         break;
     default:
@@ -1575,8 +1573,7 @@ static void aacsbr_func_ptr_init(AACSBRContext *c)
     c->sbr_hf_inverse_filter = sbr_hf_inverse_filter;
 
 #if !USE_FIXED
-#if ARCH_MIPS
-    ff_aacsbr_func_ptr_init_mips(c);
-#endif
+    if(ARCH_MIPS)
+        ff_aacsbr_func_ptr_init_mips(c);
 #endif
 }

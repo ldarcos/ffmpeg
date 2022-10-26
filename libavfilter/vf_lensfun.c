@@ -28,6 +28,7 @@
 #include <float.h>
 #include <math.h>
 
+#include "libavutil/avassert.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/opt.h"
 #include "libswscale/swscale.h"
@@ -73,7 +74,7 @@ typedef struct DistortionCorrectionThreadData {
 
 typedef struct LensfunContext {
     const AVClass *class;
-    const char *make, *model, *lens_model, *db_path;
+    const char *make, *model, *lens_model;
     int mode;
     float focal_length;
     float aperture;
@@ -97,7 +98,6 @@ static const AVOption lensfun_options[] = {
     { "make", "set camera maker", OFFSET(make), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
     { "model", "set camera model", OFFSET(model), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
     { "lens_model", "set lens model", OFFSET(lens_model), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
-    { "db_path", "set path to database", OFFSET(db_path), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
     { "mode", "set mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=GEOMETRY_DISTORTION}, 0, VIGNETTING | GEOMETRY_DISTORTION | SUBPIXEL_DISTORTION, FLAGS, "mode" },
         { "vignetting", "fix lens vignetting", 0, AV_OPT_TYPE_CONST, {.i64=VIGNETTING}, 0, 0, FLAGS, "mode" },
         { "geometry", "correct geometry distortion", 0, AV_OPT_TYPE_CONST, {.i64=GEOMETRY_DISTORTION}, 0, 0, FLAGS, "mode" },
@@ -137,10 +137,9 @@ static av_cold int init(AVFilterContext *ctx)
     const lfLens **lenses;
 
     db = lf_db_create();
-    if ((lensfun->db_path ? lf_db_load_path(db, lensfun->db_path) : lf_db_load(db)) != LF_NO_ERROR) {
+    if (lf_db_load(db) != LF_NO_ERROR) {
         lf_db_destroy(db);
-        av_log(ctx, AV_LOG_FATAL, "Failed to load lensfun database from %s path\n",
-               lensfun->db_path ? lensfun->db_path : "default");
+        av_log(ctx, AV_LOG_FATAL, "Failed to load lensfun database\n");
         return AVERROR_INVALIDDATA;
     }
 
@@ -193,6 +192,14 @@ static av_cold int init(AVFilterContext *ctx)
 
     lf_db_destroy(db);
     return 0;
+}
+
+static int query_formats(AVFilterContext *ctx)
+{
+    // Some of the functions provided by lensfun require pixels in RGB format
+    static const enum AVPixelFormat fmts[] = {AV_PIX_FMT_RGB24, AV_PIX_FMT_NONE};
+    AVFilterFormats *fmts_list = ff_make_format_list(fmts);
+    return ff_set_common_formats(ctx, fmts_list);
 }
 
 static float lanczos_kernel(float x)
@@ -456,9 +463,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
             .modifier = lensfun->modifier
         };
 
-        ff_filter_execute(ctx, vignetting_filter_slice,
-                          &vignetting_thread_data, NULL,
-                          FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
+        ctx->internal->execute(ctx,
+                               vignetting_filter_slice,
+                               &vignetting_thread_data,
+                               NULL,
+                               FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
     }
 
     if (lensfun->mode & (GEOMETRY_DISTORTION | SUBPIXEL_DISTORTION)) {
@@ -482,9 +491,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
             .interpolation_type = lensfun->interpolation_type
         };
 
-        ff_filter_execute(ctx, distortion_correction_filter_slice,
-                          &distortion_correction_thread_data, NULL,
-                          FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
+        ctx->internal->execute(ctx,
+                               distortion_correction_filter_slice,
+                               &distortion_correction_thread_data,
+                               NULL,
+                               FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
 
         av_frame_free(&in);
         return ff_filter_frame(outlink, out);
@@ -514,6 +525,7 @@ static const AVFilterPad lensfun_inputs[] = {
         .config_props = config_props,
         .filter_frame = filter_frame,
     },
+    { NULL }
 };
 
 static const AVFilterPad lensfun_outputs[] = {
@@ -521,17 +533,18 @@ static const AVFilterPad lensfun_outputs[] = {
         .name = "default",
         .type = AVMEDIA_TYPE_VIDEO,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_lensfun = {
+AVFilter ff_vf_lensfun = {
     .name          = "lensfun",
     .description   = NULL_IF_CONFIG_SMALL("Apply correction to an image based on info derived from the lensfun database."),
     .priv_size     = sizeof(LensfunContext),
     .init          = init,
     .uninit        = uninit,
-    FILTER_INPUTS(lensfun_inputs),
-    FILTER_OUTPUTS(lensfun_outputs),
-    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_RGB24),
+    .query_formats = query_formats,
+    .inputs        = lensfun_inputs,
+    .outputs       = lensfun_outputs,
     .priv_class    = &lensfun_class,
     .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC | AVFILTER_FLAG_SLICE_THREADS,
 };

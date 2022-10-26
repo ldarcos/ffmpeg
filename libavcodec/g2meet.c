@@ -29,17 +29,18 @@
 #include <zlib.h>
 
 #include "libavutil/imgutils.h"
+#include "libavutil/intreadwrite.h"
 #include "libavutil/mem_internal.h"
 
 #include "avcodec.h"
 #include "blockdsp.h"
 #include "bytestream.h"
-#include "codec_internal.h"
-#include "decode.h"
 #include "elsdec.h"
 #include "get_bits.h"
 #include "idctdsp.h"
+#include "internal.h"
 #include "jpegtables.h"
+#include "mjpeg.h"
 #include "mjpegdec.h"
 
 #define EPIC_PIX_STACK_SIZE 1024
@@ -59,23 +60,22 @@ enum Compression {
     COMPR_KEMPF_J_B,
 };
 
-/* These tables are already permuted according to ff_zigzag_direct */
 static const uint8_t luma_quant[64] = {
-     8,  6,  6,  7,  6,  5,  8,  7,
-     7,  7,  9,  9,  8, 10, 12, 20,
-    13, 12, 11, 11, 12, 25, 18, 19,
-    15, 20, 29, 26, 31, 30, 29, 26,
-    28, 28, 32, 36, 46, 39, 32, 34,
-    44, 35, 28, 28, 40, 55, 41, 44,
-    48, 49, 52, 52, 52, 31, 39, 57,
-    61, 56, 50, 60, 46, 51, 52, 50,
+     8,  6,  5,  8, 12, 20, 26, 31,
+     6,  6,  7, 10, 13, 29, 30, 28,
+     7,  7,  8, 12, 20, 29, 35, 28,
+     7,  9, 11, 15, 26, 44, 40, 31,
+     9, 11, 19, 28, 34, 55, 52, 39,
+    12, 18, 28, 32, 41, 52, 57, 46,
+    25, 32, 39, 44, 52, 61, 60, 51,
+    36, 46, 48, 49, 56, 50, 52, 50
 };
 
 static const uint8_t chroma_quant[64] = {
-     9,  9,  9, 12, 11, 12, 24, 13,
-    13, 24, 50, 33, 28, 33, 50, 50,
-    50, 50, 50, 50, 50, 50, 50, 50,
-    50, 50, 50, 50, 50, 50, 50, 50,
+     9,  9, 12, 24, 50, 50, 50, 50,
+     9, 11, 13, 33, 50, 50, 50, 50,
+    12, 13, 28, 50, 50, 50, 50, 50,
+    24, 33, 50, 50, 50, 50, 50, 50,
     50, 50, 50, 50, 50, 50, 50, 50,
     50, 50, 50, 50, 50, 50, 50, 50,
     50, 50, 50, 50, 50, 50, 50, 50,
@@ -121,7 +121,7 @@ typedef struct ePICContext {
 typedef struct JPGContext {
     BlockDSPContext bdsp;
     IDCTDSPContext idsp;
-    uint8_t    permutated_scantable[64];
+    ScanTable  scantable;
 
     VLC        dc_vlc[2], ac_vlc[2];
     int        prev_dc[3];
@@ -164,27 +164,27 @@ static av_cold int jpg_init(AVCodecContext *avctx, JPGContext *c)
 {
     int ret;
 
-    ret = ff_mjpeg_build_vlc(&c->dc_vlc[0], ff_mjpeg_bits_dc_luminance,
-                             ff_mjpeg_val_dc, 0, avctx);
+    ret = ff_mjpeg_build_vlc(&c->dc_vlc[0], avpriv_mjpeg_bits_dc_luminance,
+                             avpriv_mjpeg_val_dc, 0, avctx);
     if (ret)
         return ret;
-    ret = ff_mjpeg_build_vlc(&c->dc_vlc[1], ff_mjpeg_bits_dc_chrominance,
-                             ff_mjpeg_val_dc, 0, avctx);
+    ret = ff_mjpeg_build_vlc(&c->dc_vlc[1], avpriv_mjpeg_bits_dc_chrominance,
+                             avpriv_mjpeg_val_dc, 0, avctx);
     if (ret)
         return ret;
-    ret = ff_mjpeg_build_vlc(&c->ac_vlc[0], ff_mjpeg_bits_ac_luminance,
-                             ff_mjpeg_val_ac_luminance, 1, avctx);
+    ret = ff_mjpeg_build_vlc(&c->ac_vlc[0], avpriv_mjpeg_bits_ac_luminance,
+                             avpriv_mjpeg_val_ac_luminance, 1, avctx);
     if (ret)
         return ret;
-    ret = ff_mjpeg_build_vlc(&c->ac_vlc[1], ff_mjpeg_bits_ac_chrominance,
-                             ff_mjpeg_val_ac_chrominance, 1, avctx);
+    ret = ff_mjpeg_build_vlc(&c->ac_vlc[1], avpriv_mjpeg_bits_ac_chrominance,
+                             avpriv_mjpeg_val_ac_chrominance, 1, avctx);
     if (ret)
         return ret;
 
-    ff_blockdsp_init(&c->bdsp);
+    ff_blockdsp_init(&c->bdsp, avctx);
     ff_idctdsp_init(&c->idsp, avctx);
-    ff_permute_scantable(c->permutated_scantable, ff_zigzag_direct,
-                         c->idsp.idct_permutation);
+    ff_init_scantable(c->idsp.idct_permutation, &c->scantable,
+                      ff_zigzag_direct);
 
     return 0;
 }
@@ -251,8 +251,8 @@ static int jpg_decode_block(JPGContext *c, GetBitContext *gb,
             int nbits = val;
 
             val                                 = get_xbits(gb, nbits);
-            val                                *= qmat[pos];
-            block[c->permutated_scantable[pos]] = val;
+            val                                *= qmat[ff_zigzag_direct[pos]];
+            block[c->scantable.permutated[pos]] = val;
         }
     }
     return 0;
@@ -1164,7 +1164,7 @@ static int g2m_init_buffers(G2MContext *c)
         c->framebuf_stride = FFALIGN(c->width + 15, 16) * 3;
         aligned_height     = c->height + 15;
         av_free(c->framebuf);
-        c->framebuf = av_calloc(c->framebuf_stride, aligned_height);
+        c->framebuf = av_mallocz_array(c->framebuf_stride, aligned_height);
         if (!c->framebuf)
             return AVERROR(ENOMEM);
     }
@@ -1371,12 +1371,13 @@ static void g2m_paint_cursor(G2MContext *c, uint8_t *dst, int stride)
     }
 }
 
-static int g2m_decode_frame(AVCodecContext *avctx, AVFrame *pic,
+static int g2m_decode_frame(AVCodecContext *avctx, void *data,
                             int *got_picture_ptr, AVPacket *avpkt)
 {
     const uint8_t *buf = avpkt->data;
     int buf_size = avpkt->size;
     G2MContext *c = avctx->priv_data;
+    AVFrame *pic = data;
     GetByteContext bc, tbc;
     int magic;
     int got_header = 0;
@@ -1591,6 +1592,7 @@ static av_cold int g2m_decode_init(AVCodecContext *avctx)
 
     if ((ret = jpg_init(avctx, &c->jc)) != 0) {
         av_log(avctx, AV_LOG_ERROR, "Cannot initialise VLCs\n");
+        jpg_free_context(&c->jc);
         return AVERROR(ENOMEM);
     }
 
@@ -1621,15 +1623,15 @@ static av_cold int g2m_decode_end(AVCodecContext *avctx)
     return 0;
 }
 
-const FFCodec ff_g2m_decoder = {
-    .p.name         = "g2m",
-    CODEC_LONG_NAME("Go2Meeting"),
-    .p.type         = AVMEDIA_TYPE_VIDEO,
-    .p.id           = AV_CODEC_ID_G2M,
+AVCodec ff_g2m_decoder = {
+    .name           = "g2m",
+    .long_name      = NULL_IF_CONFIG_SMALL("Go2Meeting"),
+    .type           = AVMEDIA_TYPE_VIDEO,
+    .id             = AV_CODEC_ID_G2M,
     .priv_data_size = sizeof(G2MContext),
     .init           = g2m_decode_init,
     .close          = g2m_decode_end,
-    FF_CODEC_DECODE_CB(g2m_decode_frame),
-    .p.capabilities = AV_CODEC_CAP_DR1,
-    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
+    .decode         = g2m_decode_frame,
+    .capabilities   = AV_CODEC_CAP_DR1,
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE,
 };

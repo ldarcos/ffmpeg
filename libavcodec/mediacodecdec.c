@@ -20,8 +20,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "config_components.h"
-
 #include <stdint.h>
 #include <string.h>
 
@@ -33,10 +31,8 @@
 #include "libavutil/internal.h"
 
 #include "avcodec.h"
-#include "codec_internal.h"
 #include "decode.h"
 #include "h264_parse.h"
-#include "h264_ps.h"
 #include "hevc_parse.h"
 #include "hwconfig.h"
 #include "internal.h"
@@ -159,9 +155,6 @@ static int h264_set_extradata(AVCodecContext *avctx, FFAMediaFormat *format)
         uint8_t *data = NULL;
         int data_size = 0;
 
-        avctx->profile = ff_h264_get_profile(sps);
-        avctx->level = sps->level_idc;
-
         if ((ret = h2645_ps_to_nalu(sps->data, sps->data_size, &data, &data_size)) < 0) {
             goto done;
         }
@@ -242,9 +235,6 @@ static int hevc_set_extradata(AVCodecContext *avctx, FFAMediaFormat *format)
     if (vps && pps && sps) {
         uint8_t *data;
         int data_size;
-
-        avctx->profile = sps->ptl.general_ptl.profile_idc;
-        avctx->level   = sps->ptl.general_ptl.level_idc;
 
         if ((ret = h2645_ps_to_nalu(vps->data, vps->data_size, &vps_data, &vps_data_size)) < 0 ||
             (ret = h2645_ps_to_nalu(sps->data, sps->data_size, &sps_data, &sps_data_size)) < 0 ||
@@ -532,23 +522,22 @@ static const AVClass ff_##short_name##_mediacodec_dec_class = { \
 
 #define DECLARE_MEDIACODEC_VDEC(short_name, full_name, codec_id, bsf)                          \
 DECLARE_MEDIACODEC_VCLASS(short_name)                                                          \
-const FFCodec ff_ ## short_name ## _mediacodec_decoder = {                                     \
-    .p.name         = #short_name "_mediacodec",                                               \
-    CODEC_LONG_NAME(full_name " Android MediaCodec decoder"),                                  \
-    .p.type         = AVMEDIA_TYPE_VIDEO,                                                      \
-    .p.id           = codec_id,                                                                \
-    .p.priv_class   = &ff_##short_name##_mediacodec_dec_class,                                 \
+AVCodec ff_##short_name##_mediacodec_decoder = {                                               \
+    .name           = #short_name "_mediacodec",                                               \
+    .long_name      = NULL_IF_CONFIG_SMALL(full_name " Android MediaCodec decoder"),           \
+    .type           = AVMEDIA_TYPE_VIDEO,                                                      \
+    .id             = codec_id,                                                                \
+    .priv_class     = &ff_##short_name##_mediacodec_dec_class,                                 \
     .priv_data_size = sizeof(MediaCodecH264DecContext),                                        \
     .init           = mediacodec_decode_init,                                                  \
-    FF_CODEC_RECEIVE_FRAME_CB(mediacodec_receive_frame),                                       \
+    .receive_frame  = mediacodec_receive_frame,                                                \
     .flush          = mediacodec_decode_flush,                                                 \
     .close          = mediacodec_decode_close,                                                 \
-    .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_AVOID_PROBING | AV_CODEC_CAP_HARDWARE, \
-    .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE |                                       \
-                      FF_CODEC_CAP_SETS_PKT_DTS,                                               \
+    .capabilities   = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_AVOID_PROBING | AV_CODEC_CAP_HARDWARE, \
+    .caps_internal  = FF_CODEC_CAP_SETS_PKT_DTS,                                               \
     .bsfs           = bsf,                                                                     \
     .hw_configs     = mediacodec_hw_configs,                                                   \
-    .p.wrapper_name = "mediacodec",                                                            \
+    .wrapper_name   = "mediacodec",                                                            \
 };                                                                                             \
 
 #if CONFIG_H264_MEDIACODEC_DECODER

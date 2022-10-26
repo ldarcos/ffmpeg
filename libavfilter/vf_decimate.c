@@ -43,6 +43,7 @@ typedef struct DecimateContext {
     AVFrame *last;          ///< last frame from the previous queue
     AVFrame **clean_src;    ///< frame queue for the clean source
     int got_frame[2];       ///< frame request flag for each input stream
+    AVRational ts_unit;     ///< timestamp units for the output frames
     int64_t last_pts;       ///< last output timestamp
     int64_t start_pts;      ///< base for output timestamps
     uint32_t eof;           ///< bitmask for end of stream
@@ -212,7 +213,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     /* push all frames except the drop */
     ret = 0;
     for (i = 0; i < dm->cycle && dm->queue[i].frame; i++) {
-        AVRational in_tb = ctx->inputs[INPUT_MAIN]->time_base;
         if (i == drop) {
             if (dm->ppsrc)
                 av_frame_free(&dm->clean_src[i]);
@@ -221,8 +221,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
             AVFrame *frame = dm->queue[i].frame;
             dm->queue[i].frame = NULL;
             if (frame->pts != AV_NOPTS_VALUE && dm->start_pts == AV_NOPTS_VALUE)
-                dm->start_pts = av_rescale_q(frame->pts, in_tb, outlink->time_base);
-
+                dm->start_pts = frame->pts;
             if (dm->ppsrc) {
                 av_frame_free(&frame);
                 frame = dm->clean_src[i];
@@ -230,9 +229,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
                     continue;
                 dm->clean_src[i] = NULL;
             }
-            frame->pts = outlink->frame_count_in +
+            frame->pts = av_rescale_q(outlink->frame_count_in, dm->ts_unit, (AVRational){1,1}) +
                          (dm->start_pts == AV_NOPTS_VALUE ? 0 : dm->start_pts);
-            frame->duration = 1;
             dm->last_pts = frame->pts;
             ret = ff_filter_frame(outlink, frame);
             if (ret < 0)
@@ -291,8 +289,8 @@ static int activate(AVFilterContext *ctx)
         }
     }
 
-    if (ff_inlink_queued_frames(ctx->inputs[INPUT_MAIN]) > 0 && (!dm->ppsrc ||
-        (dm->ppsrc && ff_inlink_queued_frames(ctx->inputs[INPUT_CLEANSRC]) > 0))) {
+    if (ff_inlink_queued_frames(ctx->inputs[INPUT_MAIN]) > 0 &&
+        (dm->ppsrc && ff_inlink_queued_frames(ctx->inputs[INPUT_CLEANSRC]) > 0)) {
         ff_filter_set_ready(ctx, 100);
     } else if (ff_outlink_frame_wanted(ctx->outputs[0])) {
         if (dm->got_frame[INPUT_MAIN] == 0)
@@ -312,13 +310,13 @@ static av_cold int decimate_init(AVFilterContext *ctx)
     };
     int ret;
 
-    if ((ret = ff_append_inpad(ctx, &pad)) < 0)
+    if ((ret = ff_insert_inpad(ctx, INPUT_MAIN, &pad)) < 0)
         return ret;
 
     if (dm->ppsrc) {
         pad.name = "clean_src";
         pad.config_props = NULL;
-        if ((ret = ff_append_inpad(ctx, &pad)) < 0)
+        if ((ret = ff_insert_inpad(ctx, INPUT_CLEANSRC, &pad)) < 0)
             return ret;
     }
 
@@ -352,19 +350,26 @@ static av_cold void decimate_uninit(AVFilterContext *ctx)
     av_freep(&dm->clean_src);
 }
 
-static const enum AVPixelFormat pix_fmts[] = {
+static int query_formats(AVFilterContext *ctx)
+{
+    static const enum AVPixelFormat pix_fmts[] = {
 #define PF_NOALPHA(suf) AV_PIX_FMT_YUV420##suf,  AV_PIX_FMT_YUV422##suf,  AV_PIX_FMT_YUV444##suf
 #define PF_ALPHA(suf)   AV_PIX_FMT_YUVA420##suf, AV_PIX_FMT_YUVA422##suf, AV_PIX_FMT_YUVA444##suf
 #define PF(suf)         PF_NOALPHA(suf), PF_ALPHA(suf)
-    PF(P), PF(P9), PF(P10), PF_NOALPHA(P12), PF_NOALPHA(P14), PF(P16),
-    AV_PIX_FMT_YUV440P10, AV_PIX_FMT_YUV440P12,
-    AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUV410P,
-    AV_PIX_FMT_YUVJ444P, AV_PIX_FMT_YUVJ440P, AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ420P,
-    AV_PIX_FMT_YUVJ411P,
-    AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY9, AV_PIX_FMT_GRAY10, AV_PIX_FMT_GRAY12, AV_PIX_FMT_GRAY14,
-    AV_PIX_FMT_GRAY16,
-    AV_PIX_FMT_NONE
-};
+        PF(P), PF(P9), PF(P10), PF_NOALPHA(P12), PF_NOALPHA(P14), PF(P16),
+        AV_PIX_FMT_YUV440P10, AV_PIX_FMT_YUV440P12,
+        AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUV410P,
+        AV_PIX_FMT_YUVJ444P, AV_PIX_FMT_YUVJ440P, AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ420P,
+        AV_PIX_FMT_YUVJ411P,
+        AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY9, AV_PIX_FMT_GRAY10, AV_PIX_FMT_GRAY12, AV_PIX_FMT_GRAY14,
+        AV_PIX_FMT_GRAY16,
+        AV_PIX_FMT_NONE
+    };
+    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
+    if (!fmts_list)
+        return AVERROR(ENOMEM);
+    return ff_set_common_formats(ctx, fmts_list);
+}
 
 static int config_output(AVFilterLink *outlink)
 {
@@ -406,7 +411,7 @@ static int config_output(AVFilterLink *outlink)
     fps = av_mul_q(fps, (AVRational){dm->cycle - 1, dm->cycle});
     av_log(ctx, AV_LOG_VERBOSE, "FPS: %d/%d -> %d/%d\n",
            inlink->frame_rate.num, inlink->frame_rate.den, fps.num, fps.den);
-    outlink->time_base  = av_inv_q(fps);
+    outlink->time_base  = inlink->time_base;
     outlink->frame_rate = fps;
     outlink->sample_aspect_ratio = inlink->sample_aspect_ratio;
     if (dm->ppsrc) {
@@ -416,6 +421,7 @@ static int config_output(AVFilterLink *outlink)
         outlink->w = inlink->w;
         outlink->h = inlink->h;
     }
+    dm->ts_unit = av_inv_q(av_mul_q(fps, outlink->time_base));
     return 0;
 }
 
@@ -425,17 +431,18 @@ static const AVFilterPad decimate_outputs[] = {
         .type          = AVMEDIA_TYPE_VIDEO,
         .config_props  = config_output,
     },
+    { NULL }
 };
 
-const AVFilter ff_vf_decimate = {
+AVFilter ff_vf_decimate = {
     .name          = "decimate",
     .description   = NULL_IF_CONFIG_SMALL("Decimate frames (post field matching filter)."),
     .init          = decimate_init,
     .activate      = activate,
     .uninit        = decimate_uninit,
     .priv_size     = sizeof(DecimateContext),
-    FILTER_OUTPUTS(decimate_outputs),
-    FILTER_PIXFMTS_ARRAY(pix_fmts),
+    .query_formats = query_formats,
+    .outputs       = decimate_outputs,
     .priv_class    = &decimate_class,
     .flags         = AVFILTER_FLAG_DYNAMIC_INPUTS,
 };

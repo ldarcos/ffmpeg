@@ -28,6 +28,7 @@
 
 #include "avcodec.h"
 #include "ffjni.h"
+#include "version.h"
 #include "mediacodec_wrapper.h"
 
 struct JNIAMediaCodecListFields {

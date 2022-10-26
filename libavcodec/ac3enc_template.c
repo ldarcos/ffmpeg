@@ -26,8 +26,6 @@
  * AC-3 encoder float/fixed template
  */
 
-#include "config_components.h"
-
 #include <stdint.h>
 
 #include "libavutil/attributes.h"
@@ -35,6 +33,7 @@
 #include "libavutil/mem_internal.h"
 
 #include "audiodsp.h"
+#include "internal.h"
 #include "ac3enc.h"
 #include "eac3enc.h"
 

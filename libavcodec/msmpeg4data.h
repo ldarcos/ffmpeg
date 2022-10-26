@@ -30,9 +30,7 @@
 #ifndef AVCODEC_MSMPEG4DATA_H
 #define AVCODEC_MSMPEG4DATA_H
 
-#include <stdint.h>
-
-#include "libavutil/attributes_internal.h"
+#include "libavutil/common.h"
 
 #include "rl.h"
 #include "vlc.h"
@@ -47,7 +45,6 @@ typedef struct MVTable {
     VLC vlc;                /* decoding: vlc */
 } MVTable;
 
-FF_VISIBILITY_PUSH_HIDDEN
 extern VLC ff_msmp4_mb_i_vlc;
 extern VLC ff_msmp4_dc_luma_vlc[2];
 extern VLC ff_msmp4_dc_chroma_vlc[2];
@@ -62,6 +59,7 @@ extern const uint8_t ff_wmv1_scantable[WMV1_SCANTABLE_COUNT][64];
 #define NB_RL_TABLES  6
 
 extern RLTable ff_rl_table[NB_RL_TABLES];
+extern uint8_t ff_static_rl_table_store[NB_RL_TABLES][2][2 * MAX_RUN + MAX_LEVEL + 3];
 
 extern uint32_t ff_v2_dc_lum_table[512][2];
 extern uint32_t ff_v2_dc_chroma_table[512][2];
@@ -86,6 +84,5 @@ extern const uint32_t ff_table1_dc_chroma[120][2];
 
 #define WMV2_INTER_CBP_TABLE_COUNT 4
 extern const uint32_t (* const ff_wmv2_inter_table[WMV2_INTER_CBP_TABLE_COUNT])[2];
-FF_VISIBILITY_POP_HIDDEN
 
 #endif /* AVCODEC_MSMPEG4DATA_H */

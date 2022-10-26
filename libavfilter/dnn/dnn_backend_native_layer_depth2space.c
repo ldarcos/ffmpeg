@@ -24,6 +24,7 @@
  */
 
 #include "dnn_backend_native.h"
+#include "libavutil/avassert.h"
 #include "dnn_backend_native_layer_depth2space.h"
 
 int ff_dnn_load_layer_depth2space(Layer *layer, AVIOContext *model_file_context, int file_size, int operands_num)
@@ -76,12 +77,12 @@ int ff_dnn_execute_layer_depth2space(DnnOperand *operands, const int32_t *input_
     output_operand->length = ff_calculate_operand_data_length(output_operand);
     if (output_operand->length <= 0) {
         av_log(ctx, AV_LOG_ERROR, "The output data length overflow\n");
-        return AVERROR(EINVAL);
+        return DNN_ERROR;
     }
     output_operand->data = av_realloc(output_operand->data, output_operand->length);
     if (!output_operand->data) {
         av_log(ctx, AV_LOG_ERROR, "Failed to reallocate memory for output\n");
-        return AVERROR(ENOMEM);
+        return DNN_ERROR;
     }
     output = output_operand->data;
 

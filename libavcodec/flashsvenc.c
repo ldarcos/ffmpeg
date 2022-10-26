@@ -49,8 +49,7 @@
 #include <zlib.h>
 
 #include "avcodec.h"
-#include "codec_internal.h"
-#include "encode.h"
+#include "internal.h"
 #include "put_bits.h"
 #include "bytestream.h"
 
@@ -66,15 +65,16 @@ typedef struct FlashSVContext {
     uint8_t         tmpblock[3 * 256 * 256];
 } FlashSVContext;
 
-static int copy_region_enc(const uint8_t *sptr, uint8_t *dptr, int dx, int dy,
+static int copy_region_enc(uint8_t *sptr, uint8_t *dptr, int dx, int dy,
                            int h, int w, int stride, uint8_t *pfptr)
 {
     int i, j;
+    uint8_t *nsptr;
     uint8_t *npfptr;
     int diff = 0;
 
     for (i = dx + h; i > dx; i--) {
-        const uint8_t *nsptr = sptr + i * stride + dy * 3;
+        nsptr  = sptr  + i * stride + dy * 3;
         npfptr = pfptr + i * stride + dy * 3;
         for (j = 0; j < w * 3; j++) {
             diff    |= npfptr[j] ^ nsptr[j];
@@ -229,7 +229,7 @@ static int flashsv_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         I_frame = 1;
     }
 
-    if ((res = ff_alloc_packet(avctx, pkt, s->image_width * s->image_height * 3)) < 0)
+    if ((res = ff_alloc_packet2(avctx, pkt, s->image_width * s->image_height * 3, 0)) < 0)
         return res;
 
     pkt->size = encode_bitstream(s, p, pkt->data, pkt->size, opt_w * 16, opt_h * 16,
@@ -245,8 +245,21 @@ static int flashsv_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 
     //mark the frame type so the muxer can mux it correctly
     if (I_frame) {
+#if FF_API_CODED_FRAME
+FF_DISABLE_DEPRECATION_WARNINGS
+        avctx->coded_frame->pict_type      = AV_PICTURE_TYPE_I;
+        avctx->coded_frame->key_frame      = 1;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
         s->last_key_frame = avctx->frame_number;
         ff_dlog(avctx, "Inserting keyframe at frame %d\n", avctx->frame_number);
+    } else {
+#if FF_API_CODED_FRAME
+FF_DISABLE_DEPRECATION_WARNINGS
+        avctx->coded_frame->pict_type = AV_PICTURE_TYPE_P;
+        avctx->coded_frame->key_frame = 0;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
     }
 
     if (I_frame)
@@ -256,15 +269,14 @@ static int flashsv_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     return 0;
 }
 
-const FFCodec ff_flashsv_encoder = {
-    .p.name         = "flashsv",
-    CODEC_LONG_NAME("Flash Screen Video"),
-    .p.type         = AVMEDIA_TYPE_VIDEO,
-    .p.id           = AV_CODEC_ID_FLASHSV,
-    .p.capabilities = AV_CODEC_CAP_DR1,
+AVCodec ff_flashsv_encoder = {
+    .name           = "flashsv",
+    .long_name      = NULL_IF_CONFIG_SMALL("Flash Screen Video"),
+    .type           = AVMEDIA_TYPE_VIDEO,
+    .id             = AV_CODEC_ID_FLASHSV,
     .priv_data_size = sizeof(FlashSVContext),
     .init           = flashsv_encode_init,
-    FF_CODEC_ENCODE_CB(flashsv_encode_frame),
+    .encode2        = flashsv_encode_frame,
     .close          = flashsv_encode_end,
-    .p.pix_fmts     = (const enum AVPixelFormat[]){ AV_PIX_FMT_BGR24, AV_PIX_FMT_NONE },
+    .pix_fmts       = (const enum AVPixelFormat[]){ AV_PIX_FMT_BGR24, AV_PIX_FMT_NONE },
 };
